@@ -151,7 +151,9 @@ module.exports = createInstallTargetAdapter({
         }));
       }
 
-      if (sourceRelativePath === 'agents') {
+      // `agents` is the whole surface; `agents/<file>.md` is one file from the
+      // core/extended split. Both flatten into .cursor/agents/.
+      if (sourceRelativePath === 'agents' || sourceRelativePath.startsWith('agents/')) {
         return takeUniqueOperations(createFlatFileOperations({
           moduleId: module.id,
           repoRoot,

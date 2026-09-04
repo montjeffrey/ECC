@@ -14,7 +14,8 @@
       "family": "baseline",
       "description": "Baseline agent definitions and shared AGENTS guidance.",
       "modules": [
-        "agents-core"
+        "agents-core",
+        "agents-extended"
       ]
     },
     {
@@ -22,7 +23,8 @@
       "family": "baseline",
       "description": "Core command library and workflow command docs.",
       "modules": [
-        "commands-core"
+        "commands-core",
+        "commands-extended"
       ]
     },
     {
@@ -197,7 +199,7 @@
     {
       "id": "capability:ito-compute",
       "family": "capability",
-      "description": "Authenticated Itô GPU inventory, RFQ, status, device revocation, and explicitly gated node-qualification workflows through the separately installed canonical CLI.",
+      "description": "Authenticated It\u00f4 GPU inventory, RFQ, status, device revocation, and explicitly gated node-qualification workflows through the separately installed canonical CLI.",
       "modules": [
         "ito-compute"
       ]
@@ -435,7 +437,7 @@
       "family": "agent",
       "description": "HarmonyOS application development expert agent.",
       "modules": [
-        "agents-core"
+        "agents-extended"
       ]
     },
     {
@@ -443,7 +445,7 @@
       "family": "agent",
       "description": "F# code review agent for functional idioms, type safety, and .NET testing.",
       "modules": [
-        "agents-core"
+        "agents-extended"
       ]
     },
     {
@@ -467,7 +469,7 @@
       "family": "agent",
       "description": "Production machine-learning engineering reviewer for ML pipelines, evals, serving, monitoring, and rollback.",
       "modules": [
-        "agents-core"
+        "agents-extended"
       ]
     },
     {

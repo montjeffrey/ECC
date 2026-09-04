@@ -199,8 +199,27 @@ function createFlatFileOperations({
   const normalizedSourcePath = normalizeRelativePath(sourceRelativePath);
   const sourceRoot = path.join(repoRoot || '', normalizedSourcePath);
 
-  if (!repoRoot || !fs.existsSync(sourceRoot) || !fs.statSync(sourceRoot).isDirectory()) {
+  if (!repoRoot || !fs.existsSync(sourceRoot)) {
     return [];
+  }
+
+  // A module may name a single file rather than a whole directory (the
+  // agents/commands surfaces are split into core and extended halves, which
+  // list individual files). Flatten that one file the same way.
+  if (!fs.statSync(sourceRoot).isDirectory()) {
+    const defaultFileName = path.basename(normalizedSourcePath);
+    const flattenedFileName = typeof destinationNameTransform === 'function'
+      ? destinationNameTransform(defaultFileName, normalizedSourcePath)
+      : defaultFileName;
+    if (!flattenedFileName) {
+      return [];
+    }
+    return [createManagedOperation({
+      moduleId,
+      sourceRelativePath: normalizedSourcePath,
+      destinationPath: path.join(destinationDir, flattenedFileName),
+      strategy: 'flatten-copy',
+    })];
   }
 
   const operations = [];

@@ -692,7 +692,9 @@ Suggested payload:
     "selectedModules": [
       "rules-core",
       "agents-core",
+      "agents-extended",
       "commands-core",
+      "commands-extended",
       "hooks-runtime",
       "platform-configs",
       "workflow-quality",

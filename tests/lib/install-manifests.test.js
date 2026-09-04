@@ -279,7 +279,9 @@ function runTests() {
       [
         'rules-core',
         'agents-core',
+        'agents-extended',
         'commands-core',
+        'commands-extended',
         'platform-configs',
         'skill-unified-memory',
         'workflow-quality'
@@ -433,9 +435,13 @@ function runTests() {
 
     assert.ok(plan.selectedModuleIds.includes('agents-core'),
       'Minimal install should keep the agent surface available');
+    // agents-core is the everyday half and no longer ships agents/ wholesale,
+    // so machine-learning pulls agents-extended in for its reviewer.
+    assert.ok(plan.selectedModuleIds.includes('agents-extended'),
+      'machine-learning must bring the extended agents that hold mle-reviewer');
     assert.ok(plan.operations.some(operation => (
-      operation.sourceRelativePath === 'agents'
-    )), 'Should install the agent directory that contains mle-reviewer.md');
+      operation.sourceRelativePath === 'agents/mle-reviewer.md'
+    )), 'Should install the agent file mle-reviewer.md');
     assert.ok(plan.operations.some(operation => (
       operation.sourceRelativePath === 'skills/mle-workflow'
     )), 'Should install the MLE workflow skill');
@@ -559,7 +565,7 @@ function runTests() {
     assert.deepStrictEqual(selection.ruleLanguages, ['cpp', 'golang', 'kotlin']);
     assert.deepStrictEqual(
       selection.moduleIds,
-      ['rules-core', 'agents-core', 'commands-core', 'skill-unified-memory', 'workflow-quality']
+      ['rules-core', 'agents-core', 'agents-extended', 'commands-core', 'commands-extended', 'skill-unified-memory', 'workflow-quality']
     );
   })) passed++; else failed++;
 

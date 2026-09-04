@@ -320,7 +320,9 @@ function runTests() {
         [
           'rules-core',
           'agents-core',
+          'agents-extended',
           'commands-core',
+          'commands-extended',
           'platform-configs',
           'skill-unified-memory',
           'workflow-quality',
@@ -467,7 +469,7 @@ function runTests() {
       assert.ok(result.stdout.includes('Profile: core'));
       assert.ok(result.stdout.includes('Included components: (none)'));
       assert.ok(result.stdout.includes(
-        'Selected modules: rules-core, agents-core, commands-core, hooks-runtime, '
+        'Selected modules: rules-core, agents-core, agents-extended, commands-core, commands-extended, hooks-runtime, '
         + 'platform-configs, skill-unified-memory, workflow-quality'
       ));
       assert.ok(!fs.existsSync(path.join(homeDir, '.claude', 'ecc', 'install-state.json')));
@@ -695,7 +697,9 @@ function runTests() {
         [
           'rules-core',
           'agents-core',
+          'agents-extended',
           'commands-core',
+          'commands-extended',
           'platform-configs',
           'skill-unified-memory',
           'workflow-quality'
