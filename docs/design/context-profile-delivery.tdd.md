@@ -97,4 +97,13 @@ The 77-prompt routing corpus from #2945 (52 direct, 25 paraphrased) found one wr
 - Corpus result: zero loads outside the expected set; 19 implicit admissions become 17. The other dropped admission, `skill:cost-tracking`, now defers to the bounded proposal instead of loading.
 - The existing nine-query auto/agent corpus, fallback, launch, evaluation and retrieval suites pass unchanged.
 
+## Routing-quality gate
+
+The 77-prompt routing corpus from #2945 now gates ranking quality as well as wrong loads. The evaluation pilot reports `insufficient-sample` at 13 probes, so nothing previously noticed ranking regressions.
+
+- RED: 9 cases fail with the evaluator module absent. GREEN: 8 scorer and CLI cases run in about 0.1 s against planted rows; a planted ten-prompt ranking regression breaches both direct thresholds, one wrong load fails on its own, and paraphrased ranking never gates while paraphrased wrong loads do.
+- Baseline on Node 22.22.0, registry digest `a4abb961bbb5…`: direct top-1 44/52 (0.846), top-3 48/52 (0.923), 19 implicit loads all correct; paraphrased top-1 2/25, top-3 4/25, no implicit loads.
+- Thresholds: direct top-3 at least 0.88 and top-1 at least 0.80, two prompts of slack each; zero wrong loads in both sets. Removing the seven skills added since September 1 changed none of the 52 direct rankings, so routine skill additions are not expected to trip the gate.
+- One resolver pass replaces the earlier wrong-load test instead of adding a second: 77 resolves at about 230 ms each, 19.0 s against 17.6 s before. The test job runs in about 33 matrix cells, so a separate pass would have added roughly ten CPU-minutes per push. `npm run routing:check` runs the gate locally with `--json` and `--baseline <receipt>`; it stays out of the default `npm test` chain for the same reason.
+
 These boundaries keep the shipped behavior distinct from the M1 release gate. Authenticated outcome observations, a complete Tier 2 disk diff, live-install migration, other-provider activation, whole-context token truth and release defaults remain unverified until their explicit prerequisites are available.
