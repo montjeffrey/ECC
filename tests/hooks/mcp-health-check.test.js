@@ -534,6 +534,62 @@ async function runTests() {
     })) passed++; else failed++;
   }
 
+  if (test('runs in-process through run-with-flags without spawning a second node process', () => {
+    const tempDir = createTempDir();
+    try {
+      const root = path.join(__dirname, '..', '..');
+      const runner = path.join(root, 'scripts', 'hooks', 'run-with-flags.js');
+      const raw = JSON.stringify({ tool_name: 'mcp__inproc__ping', tool_input: {} });
+      const driver = `
+        const { runHook } = require(${JSON.stringify(runner)});
+        runHook('pre:mcp-health-check', 'scripts/hooks/mcp-health-check.js', 'standard,strict', { raw: ${JSON.stringify(raw)}, truncated: false })
+          .then(r => process.stdout.write('RESULT=' + JSON.stringify({ r, loaded: Object.keys(require.cache).some(k => k.endsWith('mcp-health-check.js')) })));
+      `;
+      const result = spawnSync(process.execPath, ['-e', driver], {
+        encoding: 'utf8',
+        env: buildHookEnv({
+          CLAUDE_PLUGIN_ROOT: root,
+          CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+          ECC_MCP_CONFIG_PATH: path.join(tempDir, 'missing.json'),
+          ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json')
+        }),
+        timeout: 15000
+      });
+      const parsed = JSON.parse(result.stdout.split('RESULT=')[1]);
+      assert.strictEqual(parsed.loaded, true, 'hook module must be require()d in-process: ' + result.stderr);
+      assert.deepStrictEqual(parsed.r, { stdout: raw, exitCode: 0 });
+      assert.ok(result.stderr.includes('No MCP config found for inproc;'), result.stderr);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
+  if (test('in-process truncation still blocks, and fail-open still allows', () => {
+    const tempDir = createTempDir();
+    try {
+      const root = path.join(__dirname, '..', '..');
+      const runner = path.join(root, 'scripts', 'hooks', 'run-with-flags.js');
+      const raw = '{"tool_name":"mcp__inproc__ping","tool_input":{"x":"';
+      const driver = `
+        const { runHook } = require(${JSON.stringify(runner)});
+        runHook('pre:mcp-health-check', 'scripts/hooks/mcp-health-check.js', 'standard,strict', { raw: ${JSON.stringify(raw)}, truncated: true, hookContext: {} })
+          .then(r => process.stdout.write('RESULT=' + JSON.stringify(r)));
+      `;
+      const exec = env => spawnSync(process.execPath, ['-e', driver], {
+        encoding: 'utf8',
+        env: buildHookEnv({ CLAUDE_PLUGIN_ROOT: root, ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json'), ...env }),
+        timeout: 15000
+      });
+      const blocked = exec({ ECC_MCP_HEALTH_FAIL_OPEN: null });
+      assert.deepStrictEqual(JSON.parse(blocked.stdout.split('RESULT=')[1]), { stdout: '', exitCode: 2 });
+      const open = exec({ ECC_MCP_HEALTH_FAIL_OPEN: '1' });
+      assert.deepStrictEqual(JSON.parse(open.stdout.split('RESULT=')[1]), { stdout: '', exitCode: 0 });
+      assert.ok(open.stderr.includes('allowing') && open.stderr.includes('inproc'), open.stderr);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
   if (await asyncTest('supports explicit tool_input server targets and mcp_servers config aliases', async () => {
     const tempDir = createTempDir();
     const configPath = path.join(tempDir, 'claude.json');

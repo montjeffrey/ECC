@@ -183,15 +183,10 @@ function extractMcpTarget(input) {
   // server. It is consulted only for generic wrapper tools that carry the
   // target in their arguments (tool_name is not an mcp__ name).
   const nested = fromToolName ? null : input.tool_input;
-  const explicitServer = serverIdOrNull(input.server)
-    || serverIdOrNull(input.mcp_server)
-    || serverIdOrNull(nested?.server)
-    || serverIdOrNull(nested?.mcp_server)
-    || serverIdOrNull(nested?.connector);
-  const explicitTool = nonEmptyStringOrNull(input.tool)
-    || nonEmptyStringOrNull(input.mcp_tool)
-    || nonEmptyStringOrNull(nested?.tool)
-    || nonEmptyStringOrNull(nested?.mcp_tool);
+  const explicitServer = [input.server, input.mcp_server, nested?.server, nested?.mcp_server, nested?.connector]
+    .map(serverIdOrNull).find(Boolean);
+  const explicitTool = [input.tool, input.mcp_tool, nested?.tool, nested?.mcp_tool]
+    .map(nonEmptyStringOrNull).find(Boolean);
 
   if (explicitServer) {
     return {
@@ -756,12 +751,6 @@ function shouldFailOpen() {
   return /^(1|true|yes)$/i.test(String(process.env.ECC_MCP_HEALTH_FAIL_OPEN || ''));
 }
 
-function emitLogs(logs) {
-  for (const line of logs) {
-    process.stderr.write(`${line}\n`);
-  }
-}
-
 async function handlePreToolUse(rawInput, input, target, statePathValue, now) {
   const logs = [];
   const state = loadState(statePathValue);
@@ -879,28 +868,25 @@ async function handlePostToolUseFailure(rawInput, input, target, statePathValue,
   return { rawInput, exitCode: 0, logs };
 }
 
-async function main() {
-  const { raw: rawInput, truncated } = await readRawStdin();
+// Runs the hook for one raw payload and returns { stdout, stderr, exitCode }.
+// run-with-flags.js require()s this and calls it in-process (see its run()
+// contract); main() below keeps direct execution working.
+async function run(rawInput, context = {}) {
   const input = safeParse(rawInput);
-  const target = extractMcpTarget(input) || (truncated ? extractMcpTargetFromRaw(rawInput) : null);
+  const target = extractMcpTarget(input) || (context.truncated ? extractMcpTargetFromRaw(rawInput) : null);
 
   if (!target) {
-    process.stdout.write(rawInput);
-    process.exit(0);
-    return;
+    return { stdout: rawInput, stderr: '', exitCode: 0 };
   }
 
-  if (truncated) {
-    const limit = Number(process.env.ECC_HOOK_INPUT_MAX_BYTES) || MAX_STDIN;
+  if (context.truncated) {
+    const limit = Number(context.maxStdin) || MAX_STDIN;
     const logs = [
       shouldFailOpen()
         ? `[MCPHealthCheck] Hook input exceeded ${limit} bytes while checking ${target.server}; allowing ${target.tool || 'tool'} because fail-open mode is enabled`
         : `[MCPHealthCheck] Hook input exceeded ${limit} bytes while checking ${target.server}; blocking ${target.tool || 'tool'} to avoid bypassing MCP health checks`
     ];
-    emitLogs(logs);
-    process.stdout.write(rawInput);
-    process.exit(shouldFailOpen() ? 0 : 2);
-    return;
+    return { stdout: rawInput, stderr: logs.join('\n'), exitCode: shouldFailOpen() ? 0 : 2 };
   }
 
   const eventName = process.env.CLAUDE_HOOK_EVENT_NAME || 'PreToolUse';
@@ -911,12 +897,27 @@ async function main() {
     ? await handlePostToolUseFailure(rawInput, input, target, statePathValue, now)
     : await handlePreToolUse(rawInput, input, target, statePathValue, now);
 
-  emitLogs(result.logs);
-  process.stdout.write(result.rawInput);
+  return { stdout: result.rawInput, stderr: result.logs.join('\n'), exitCode: result.exitCode };
+}
+
+async function main() {
+  const { raw, truncated } = await readRawStdin();
+  const result = await run(raw, {
+    truncated,
+    maxStdin: Number(process.env.ECC_HOOK_INPUT_MAX_BYTES) || MAX_STDIN
+  });
+  if (result.stderr) {
+    process.stderr.write(`${result.stderr}\n`);
+  }
+  process.stdout.write(result.stdout);
   process.exit(result.exitCode);
 }
 
-main().catch(error => {
-  process.stderr.write(`[MCPHealthCheck] Unexpected error: ${error.message}\n`);
-  process.exit(0);
-});
+module.exports = { run };
+
+if (require.main === module) {
+  main().catch(error => {
+    process.stderr.write(`[MCPHealthCheck] Unexpected error: ${error.message}\n`);
+    process.exit(0);
+  });
+}
