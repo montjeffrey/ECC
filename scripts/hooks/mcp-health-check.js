@@ -178,11 +178,12 @@ function extractMcpTarget(input) {
     }
   }
 
-  // tool_input is the MCP tool's own arguments when the tool name is
-  // mcp__<server>__<tool>, so its fields describe that tool's inputs, not the
-  // server. It is consulted only for generic wrapper tools that carry the
-  // target in their arguments (tool_name is not an mcp__ name).
-  const nested = fromToolName ? null : input.tool_input;
+  // tool_input is the MCP tool's own arguments when the tool name starts with
+  // mcp__, so its fields describe that tool's inputs, not the server. This holds
+  // even when the name does not parse as mcp__<server>__<tool>: an argument must
+  // never choose the probed server. It is consulted only for generic wrapper
+  // tools that carry the target in their arguments (tool_name is not an mcp__ name).
+  const nested = toolName.startsWith('mcp__') ? null : input.tool_input;
   const explicitServer = [input.server, input.mcp_server, nested?.server, nested?.mcp_server, nested?.connector]
     .map(serverIdOrNull).find(Boolean);
   const explicitTool = [input.tool, input.mcp_tool, nested?.tool, nested?.mcp_tool]
@@ -652,7 +653,7 @@ function reconnectCommand(serverName) {
   if (!/^(1|true|yes)$/i.test(String(process.env.ECC_MCP_RECONNECT_ALLOW || ''))) {
     return null;
   }
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(serverName || ''))) {
+  if (!SERVER_ID_PATTERN.test(String(serverName || ''))) {
     return null;
   }
   const key = `ECC_MCP_RECONNECT_${String(serverName).toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;

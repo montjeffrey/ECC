@@ -524,6 +524,69 @@ async function runTests() {
     assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
   })) passed++; else failed++;
 
+  // A tool name that starts with mcp__ but does not parse as mcp__<server>__<tool> is still
+  // an MCP tool: its arguments must not pick the probed server, so there is no target.
+  for (const [label, toolName] of [
+    ['no second separator', 'mcp__foo'],
+    ['empty server', 'mcp____tool'],
+    ['bare prefix', 'mcp__']
+  ]) {
+    if (test(`ignores tool_input server arguments for an unparseable mcp__ tool name (${label})`, () => {
+      const stderr = missingConfigLog({
+        tool_name: toolName,
+        tool_input: { server: 'argchosen', mcp_server: 'argchosen2', connector: 'argchosen3', tool: 'x' }
+      });
+      assert.strictEqual(stderr, '', 'No target means pass through silently');
+    })) passed++; else failed++;
+  }
+
+  if (await asyncTest('ignores tool_input server arguments for an unparseable mcp__ tool name in truncated input', async () => {
+    const hook = require(script);
+    const raw = '{"tool_name":"mcp__foo","tool_input":{"server":"argchosen","tool":"x"}}';
+    const result = await hook.run(raw, { truncated: true, maxStdin: 10 });
+    assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(result.stderr, '');
+    assert.strictEqual(result.stdout, raw);
+  })) passed++; else failed++;
+
+  if (await asyncTest('never launches or records a decoy server named in tool_input of an mcp__ tool call', async () => {
+    const tempDir = createTempDir();
+    const configPath = path.join(tempDir, 'claude.json');
+    const statePath = path.join(tempDir, 'mcp-health.json');
+    const markerPath = path.join(tempDir, 'decoy-ran.txt');
+    const realScript = path.join(tempDir, 'real-server.js');
+    const decoyScript = path.join(tempDir, 'decoy-server.js');
+
+    try {
+      fs.writeFileSync(realScript, 'setInterval(() => {}, 1000);\n');
+      fs.writeFileSync(decoyScript, `require('fs').appendFileSync(${JSON.stringify(markerPath)}, 'decoy\\n'); setInterval(() => {}, 1000);\n`);
+      writeConfig(configPath, {
+        mcpServers: {
+          real: createCommandConfig(realScript),
+          decoy: createCommandConfig(decoyScript)
+        }
+      });
+
+      const result = runHook(
+        { tool_name: 'mcp__real__do', tool_input: { server: 'decoy', mcp_server: 'decoy', connector: 'decoy' } },
+        {
+          CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+          ECC_MCP_CONFIG_PATH: configPath,
+          ECC_MCP_HEALTH_STATE_PATH: statePath,
+          ECC_MCP_HEALTH_TIMEOUT_MS: '1000'
+        }
+      );
+
+      assert.strictEqual(result.code, 0, hookFailureDetails(result, statePath));
+      assert.ok(!fs.existsSync(markerPath), 'Decoy server command must never be launched');
+      const state = readState(statePath);
+      assert.strictEqual(state.servers.decoy, undefined, 'No health state may be recorded for the decoy');
+      assert.strictEqual(state.servers.real.status, 'healthy', 'The server named by the tool name is the one probed');
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
   for (const [label, toolName, serverName] of [
     ['plugin-provided', 'mcp__plugin_claude-mem_mcp-search__search', 'plugin_claude-mem_mcp-search'],
     ['connector UUID', 'mcp__0f8fad5b-d9cb-469f-a165-70867728950e__list_things', '0f8fad5b-d9cb-469f-a165-70867728950e']
