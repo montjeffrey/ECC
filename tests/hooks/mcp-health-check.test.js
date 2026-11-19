@@ -485,6 +485,55 @@ async function runTests() {
     }
   })) passed++; else failed++;
 
+  // The server is named by the mcp__<server>__<tool> tool name. tool_input holds the
+  // MCP tool's own arguments, so an argument called server/mcp_server/connector must
+  // never rename the server, and an object value must never be stringified into it.
+  const missingConfigLog = (input) => {
+    const tempDir = createTempDir();
+    try {
+      const result = runHook(input, {
+        CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+        ECC_MCP_CONFIG_PATH: path.join(tempDir, 'missing.json'),
+        ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json')
+      });
+      assert.strictEqual(result.code, 0, result.stderr);
+      return result.stderr;
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  };
+
+  if (test('does not stringify an object tool_input.server into the server name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', tool_input: { server: { host: 'x' }, connector: { a: 1 } } });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+    assert.ok(!stderr.includes('[object Object]'), stderr);
+  })) passed++; else failed++;
+
+  if (test('does not stringify an object top-level server into the server name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', server: { host: 'x' }, mcp_server: ['a'] });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  if (test('a string tool_input.server argument does not override the server in an mcp__ tool name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', tool_input: { server: 'unrelated', mcp_server: 'other', connector: 'conn' } });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  if (test('ignores explicit server values that cannot be a server id', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', server: '', mcp_server: 'has space; rm' });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  for (const [label, toolName, serverName] of [
+    ['plugin-provided', 'mcp__plugin_claude-mem_mcp-search__search', 'plugin_claude-mem_mcp-search'],
+    ['connector UUID', 'mcp__0f8fad5b-d9cb-469f-a165-70867728950e__list_things', '0f8fad5b-d9cb-469f-a165-70867728950e']
+  ]) {
+    if (test(`derives the server name from ${label} tool names`, () => {
+      const stderr = missingConfigLog({ tool_name: toolName, tool_input: { server: { nested: true } } });
+      assert.ok(stderr.includes(`No MCP config found for ${serverName};`), stderr);
+    })) passed++; else failed++;
+  }
+
   if (await asyncTest('supports explicit tool_input server targets and mcp_servers config aliases', async () => {
     const tempDir = createTempDir();
     const configPath = path.join(tempDir, 'claude.json');
