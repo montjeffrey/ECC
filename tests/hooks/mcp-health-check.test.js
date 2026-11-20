@@ -485,6 +485,174 @@ async function runTests() {
     }
   })) passed++; else failed++;
 
+  // The server is named by the mcp__<server>__<tool> tool name. tool_input holds the
+  // MCP tool's own arguments, so an argument called server/mcp_server/connector must
+  // never rename the server, and an object value must never be stringified into it.
+  const missingConfigLog = (input) => {
+    const tempDir = createTempDir();
+    try {
+      const result = runHook(input, {
+        CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+        ECC_MCP_CONFIG_PATH: path.join(tempDir, 'missing.json'),
+        ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json')
+      });
+      assert.strictEqual(result.code, 0, result.stderr);
+      return result.stderr;
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  };
+
+  if (test('does not stringify an object tool_input.server into the server name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', tool_input: { server: { host: 'x' }, connector: { a: 1 } } });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+    assert.ok(!stderr.includes('[object Object]'), stderr);
+  })) passed++; else failed++;
+
+  if (test('does not stringify an object top-level server into the server name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', server: { host: 'x' }, mcp_server: ['a'] });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  if (test('a string tool_input.server argument does not override the server in an mcp__ tool name', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', tool_input: { server: 'unrelated', mcp_server: 'other', connector: 'conn' } });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  if (test('ignores explicit server values that cannot be a server id', () => {
+    const stderr = missingConfigLog({ tool_name: 'mcp__realsrv__lookup', server: '', mcp_server: 'has space; rm' });
+    assert.ok(stderr.includes('No MCP config found for realsrv;'), stderr);
+  })) passed++; else failed++;
+
+  // A tool name that starts with mcp__ but does not parse as mcp__<server>__<tool> is still
+  // an MCP tool: its arguments must not pick the probed server, so there is no target.
+  for (const [label, toolName] of [
+    ['no second separator', 'mcp__foo'],
+    ['empty server', 'mcp____tool'],
+    ['bare prefix', 'mcp__']
+  ]) {
+    if (test(`ignores tool_input server arguments for an unparseable mcp__ tool name (${label})`, () => {
+      const stderr = missingConfigLog({
+        tool_name: toolName,
+        tool_input: { server: 'argchosen', mcp_server: 'argchosen2', connector: 'argchosen3', tool: 'x' }
+      });
+      assert.strictEqual(stderr, '', 'No target means pass through silently');
+    })) passed++; else failed++;
+  }
+
+  if (await asyncTest('ignores tool_input server arguments for an unparseable mcp__ tool name in truncated input', async () => {
+    const hook = require(script);
+    const raw = '{"tool_name":"mcp__foo","tool_input":{"server":"argchosen","tool":"x"}}';
+    const result = await hook.run(raw, { truncated: true, maxStdin: 10 });
+    assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(result.stderr, '');
+    assert.strictEqual(result.stdout, raw);
+  })) passed++; else failed++;
+
+  if (await asyncTest('never launches or records a decoy server named in tool_input of an mcp__ tool call', async () => {
+    const tempDir = createTempDir();
+    const configPath = path.join(tempDir, 'claude.json');
+    const statePath = path.join(tempDir, 'mcp-health.json');
+    const markerPath = path.join(tempDir, 'decoy-ran.txt');
+    const realScript = path.join(tempDir, 'real-server.js');
+    const decoyScript = path.join(tempDir, 'decoy-server.js');
+
+    try {
+      fs.writeFileSync(realScript, 'setInterval(() => {}, 1000);\n');
+      fs.writeFileSync(decoyScript, `require('fs').appendFileSync(${JSON.stringify(markerPath)}, 'decoy\\n'); setInterval(() => {}, 1000);\n`);
+      writeConfig(configPath, {
+        mcpServers: {
+          real: createCommandConfig(realScript),
+          decoy: createCommandConfig(decoyScript)
+        }
+      });
+
+      const result = runHook(
+        { tool_name: 'mcp__real__do', tool_input: { server: 'decoy', mcp_server: 'decoy', connector: 'decoy' } },
+        {
+          CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+          ECC_MCP_CONFIG_PATH: configPath,
+          ECC_MCP_HEALTH_STATE_PATH: statePath,
+          ECC_MCP_HEALTH_TIMEOUT_MS: '1000'
+        }
+      );
+
+      assert.strictEqual(result.code, 0, hookFailureDetails(result, statePath));
+      assert.ok(!fs.existsSync(markerPath), 'Decoy server command must never be launched');
+      const state = readState(statePath);
+      assert.strictEqual(state.servers.decoy, undefined, 'No health state may be recorded for the decoy');
+      assert.strictEqual(state.servers.real.status, 'healthy', 'The server named by the tool name is the one probed');
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
+  for (const [label, toolName, serverName] of [
+    ['plugin-provided', 'mcp__plugin_claude-mem_mcp-search__search', 'plugin_claude-mem_mcp-search'],
+    ['connector UUID', 'mcp__0f8fad5b-d9cb-469f-a165-70867728950e__list_things', '0f8fad5b-d9cb-469f-a165-70867728950e']
+  ]) {
+    if (test(`derives the server name from ${label} tool names`, () => {
+      const stderr = missingConfigLog({ tool_name: toolName, tool_input: { server: { nested: true } } });
+      assert.ok(stderr.includes(`No MCP config found for ${serverName};`), stderr);
+    })) passed++; else failed++;
+  }
+
+  if (test('runs in-process through run-with-flags without spawning a second node process', () => {
+    const tempDir = createTempDir();
+    try {
+      const root = path.join(__dirname, '..', '..');
+      const runner = path.join(root, 'scripts', 'hooks', 'run-with-flags.js');
+      const raw = JSON.stringify({ tool_name: 'mcp__inproc__ping', tool_input: {} });
+      const driver = `
+        const { runHook } = require(${JSON.stringify(runner)});
+        runHook('pre:mcp-health-check', 'scripts/hooks/mcp-health-check.js', 'standard,strict', { raw: ${JSON.stringify(raw)}, truncated: false })
+          .then(r => process.stdout.write('RESULT=' + JSON.stringify({ r, loaded: Object.keys(require.cache).some(k => k.endsWith('mcp-health-check.js')) })));
+      `;
+      const result = spawnSync(process.execPath, ['-e', driver], {
+        encoding: 'utf8',
+        env: buildHookEnv({
+          CLAUDE_PLUGIN_ROOT: root,
+          CLAUDE_HOOK_EVENT_NAME: 'PreToolUse',
+          ECC_MCP_CONFIG_PATH: path.join(tempDir, 'missing.json'),
+          ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json')
+        }),
+        timeout: 15000
+      });
+      const parsed = JSON.parse(result.stdout.split('RESULT=')[1]);
+      assert.strictEqual(parsed.loaded, true, 'hook module must be require()d in-process: ' + result.stderr);
+      assert.deepStrictEqual(parsed.r, { stdout: raw, exitCode: 0 });
+      assert.ok(result.stderr.includes('No MCP config found for inproc;'), result.stderr);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
+  if (test('in-process truncation still blocks, and fail-open still allows', () => {
+    const tempDir = createTempDir();
+    try {
+      const root = path.join(__dirname, '..', '..');
+      const runner = path.join(root, 'scripts', 'hooks', 'run-with-flags.js');
+      const raw = '{"tool_name":"mcp__inproc__ping","tool_input":{"x":"';
+      const driver = `
+        const { runHook } = require(${JSON.stringify(runner)});
+        runHook('pre:mcp-health-check', 'scripts/hooks/mcp-health-check.js', 'standard,strict', { raw: ${JSON.stringify(raw)}, truncated: true, hookContext: {} })
+          .then(r => process.stdout.write('RESULT=' + JSON.stringify(r)));
+      `;
+      const exec = env => spawnSync(process.execPath, ['-e', driver], {
+        encoding: 'utf8',
+        env: buildHookEnv({ CLAUDE_PLUGIN_ROOT: root, ECC_MCP_HEALTH_STATE_PATH: path.join(tempDir, 'state.json'), ...env }),
+        timeout: 15000
+      });
+      const blocked = exec({ ECC_MCP_HEALTH_FAIL_OPEN: null });
+      assert.deepStrictEqual(JSON.parse(blocked.stdout.split('RESULT=')[1]), { stdout: '', exitCode: 2 });
+      const open = exec({ ECC_MCP_HEALTH_FAIL_OPEN: '1' });
+      assert.deepStrictEqual(JSON.parse(open.stdout.split('RESULT=')[1]), { stdout: '', exitCode: 0 });
+      assert.ok(open.stderr.includes('allowing') && open.stderr.includes('inproc'), open.stderr);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  })) passed++; else failed++;
+
   if (await asyncTest('supports explicit tool_input server targets and mcp_servers config aliases', async () => {
     const tempDir = createTempDir();
     const configPath = path.join(tempDir, 'claude.json');

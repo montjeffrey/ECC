@@ -152,40 +152,51 @@ function safeParse(raw) {
   }
 }
 
+const SERVER_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+// An explicit server value is only usable when it is a string that could be a
+// server id. Objects and other types must never be stringified into a name.
+function serverIdOrNull(value) {
+  return typeof value === 'string' && SERVER_ID_PATTERN.test(value) ? value : null;
+}
+
+function nonEmptyStringOrNull(value) {
+  return typeof value === 'string' && value ? value : null;
+}
+
 function extractMcpTarget(input) {
   const toolName = String(input.tool_name || input.name || '');
-  const explicitServer = input.server
-    || input.mcp_server
-    || input.tool_input?.server
-    || input.tool_input?.mcp_server
-    || input.tool_input?.connector
-    || null;
-  const explicitTool = input.tool
-    || input.mcp_tool
-    || input.tool_input?.tool
-    || input.tool_input?.mcp_tool
-    || null;
+
+  let fromToolName = null;
+  if (toolName.startsWith('mcp__')) {
+    const segments = toolName.slice(5).split('__');
+    if (segments.length >= 2 && segments[0]) {
+      fromToolName = {
+        server: segments[0],
+        tool: segments.slice(1).join('__')
+      };
+    }
+  }
+
+  // tool_input is the MCP tool's own arguments when the tool name starts with
+  // mcp__, so its fields describe that tool's inputs, not the server. This holds
+  // even when the name does not parse as mcp__<server>__<tool>: an argument must
+  // never choose the probed server. It is consulted only for generic wrapper
+  // tools that carry the target in their arguments (tool_name is not an mcp__ name).
+  const nested = toolName.startsWith('mcp__') ? null : input.tool_input;
+  const explicitServer = [input.server, input.mcp_server, nested?.server, nested?.mcp_server, nested?.connector]
+    .map(serverIdOrNull).find(Boolean);
+  const explicitTool = [input.tool, input.mcp_tool, nested?.tool, nested?.mcp_tool]
+    .map(nonEmptyStringOrNull).find(Boolean);
 
   if (explicitServer) {
     return {
-      server: String(explicitServer),
-      tool: explicitTool ? String(explicitTool) : toolName
+      server: explicitServer,
+      tool: explicitTool || toolName
     };
   }
 
-  if (!toolName.startsWith('mcp__')) {
-    return null;
-  }
-
-  const segments = toolName.slice(5).split('__');
-  if (segments.length < 2 || !segments[0]) {
-    return null;
-  }
-
-  return {
-    server: segments[0],
-    tool: segments.slice(1).join('__')
-  };
+  return fromToolName;
 }
 
 function extractMcpTargetFromRaw(raw) {
@@ -193,10 +204,14 @@ function extractMcpTargetFromRaw(raw) {
   const serverMatch = raw.match(/"(?:server|mcp_server|connector)"\s*:\s*"([^"]+)"/);
   const toolMatch = raw.match(/"(?:tool|mcp_tool)"\s*:\s*"([^"]+)"/);
 
+  // The patterns match anywhere in the raw text, so a value found this way may
+  // be a tool argument: pass it as tool_input so an mcp__ tool name wins.
   return extractMcpTarget({
     tool_name: toolNameMatch ? toolNameMatch[1] : '',
-    server: serverMatch ? serverMatch[1] : undefined,
-    tool: toolMatch ? toolMatch[1] : undefined
+    tool_input: {
+      server: serverMatch ? serverMatch[1] : undefined,
+      tool: toolMatch ? toolMatch[1] : undefined
+    }
   });
 }
 
@@ -204,7 +219,7 @@ function resolveServerConfig(serverName) {
   // SECURITY: serverName flows into env-var lookup and shell-adjacent paths.
   // Reject anything outside a strict token so config-controlled names cannot
   // inject shell metachars ($(..), backticks, ;) downstream.
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(serverName || ''))) {
+  if (!SERVER_ID_PATTERN.test(String(serverName || ''))) {
     return null;
   }
   for (const filePath of configPaths()) {
@@ -638,7 +653,7 @@ function reconnectCommand(serverName) {
   if (!/^(1|true|yes)$/i.test(String(process.env.ECC_MCP_RECONNECT_ALLOW || ''))) {
     return null;
   }
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(serverName || ''))) {
+  if (!SERVER_ID_PATTERN.test(String(serverName || ''))) {
     return null;
   }
   const key = `ECC_MCP_RECONNECT_${String(serverName).toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
@@ -735,12 +750,6 @@ function attemptReconnect(serverName) {
 
 function shouldFailOpen() {
   return /^(1|true|yes)$/i.test(String(process.env.ECC_MCP_HEALTH_FAIL_OPEN || ''));
-}
-
-function emitLogs(logs) {
-  for (const line of logs) {
-    process.stderr.write(`${line}\n`);
-  }
 }
 
 async function handlePreToolUse(rawInput, input, target, statePathValue, now) {
@@ -860,28 +869,25 @@ async function handlePostToolUseFailure(rawInput, input, target, statePathValue,
   return { rawInput, exitCode: 0, logs };
 }
 
-async function main() {
-  const { raw: rawInput, truncated } = await readRawStdin();
+// Runs the hook for one raw payload and returns { stdout, stderr, exitCode }.
+// run-with-flags.js require()s this and calls it in-process (see its run()
+// contract); main() below keeps direct execution working.
+async function run(rawInput, context = {}) {
   const input = safeParse(rawInput);
-  const target = extractMcpTarget(input) || (truncated ? extractMcpTargetFromRaw(rawInput) : null);
+  const target = extractMcpTarget(input) || (context.truncated ? extractMcpTargetFromRaw(rawInput) : null);
 
   if (!target) {
-    process.stdout.write(rawInput);
-    process.exit(0);
-    return;
+    return { stdout: rawInput, stderr: '', exitCode: 0 };
   }
 
-  if (truncated) {
-    const limit = Number(process.env.ECC_HOOK_INPUT_MAX_BYTES) || MAX_STDIN;
+  if (context.truncated) {
+    const limit = Number(context.maxStdin) || MAX_STDIN;
     const logs = [
       shouldFailOpen()
         ? `[MCPHealthCheck] Hook input exceeded ${limit} bytes while checking ${target.server}; allowing ${target.tool || 'tool'} because fail-open mode is enabled`
         : `[MCPHealthCheck] Hook input exceeded ${limit} bytes while checking ${target.server}; blocking ${target.tool || 'tool'} to avoid bypassing MCP health checks`
     ];
-    emitLogs(logs);
-    process.stdout.write(rawInput);
-    process.exit(shouldFailOpen() ? 0 : 2);
-    return;
+    return { stdout: rawInput, stderr: logs.join('\n'), exitCode: shouldFailOpen() ? 0 : 2 };
   }
 
   const eventName = process.env.CLAUDE_HOOK_EVENT_NAME || 'PreToolUse';
@@ -892,12 +898,27 @@ async function main() {
     ? await handlePostToolUseFailure(rawInput, input, target, statePathValue, now)
     : await handlePreToolUse(rawInput, input, target, statePathValue, now);
 
-  emitLogs(result.logs);
-  process.stdout.write(result.rawInput);
+  return { stdout: result.rawInput, stderr: result.logs.join('\n'), exitCode: result.exitCode };
+}
+
+async function main() {
+  const { raw, truncated } = await readRawStdin();
+  const result = await run(raw, {
+    truncated,
+    maxStdin: Number(process.env.ECC_HOOK_INPUT_MAX_BYTES) || MAX_STDIN
+  });
+  if (result.stderr) {
+    process.stderr.write(`${result.stderr}\n`);
+  }
+  process.stdout.write(result.stdout);
   process.exit(result.exitCode);
 }
 
-main().catch(error => {
-  process.stderr.write(`[MCPHealthCheck] Unexpected error: ${error.message}\n`);
-  process.exit(0);
-});
+module.exports = { run };
+
+if (require.main === module) {
+  main().catch(error => {
+    process.stderr.write(`[MCPHealthCheck] Unexpected error: ${error.message}\n`);
+    process.exit(0);
+  });
+}
