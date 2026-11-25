@@ -227,6 +227,92 @@ test('a cache hit launches git once, only to ask for the origin', () => {
   }
 });
 
+test('a newly initialized nested repository replaces the cached parent, even with the same origin', () => {
+  for (const sameOrigin of [false, true]) {
+    for (const explicit of [false, true]) {
+      const tmp = createTempDir();
+      try {
+        const home = path.join(tmp, 'home');
+        fs.mkdirSync(home);
+        const remote = 'https://github.com/example/parent.git';
+        const parent = makeRepo(tmp, 'parent', remote);
+        const nested = path.join(parent, 'nested');
+        fs.mkdirSync(nested);
+        const env = explicit ? { CLAUDE_PROJECT_DIR: nested } : {};
+        const before = detect(nested, home, env);
+        assert.strictEqual(before.root, fs.realpathSync(parent));
+        assert.strictEqual(detect(nested, home, env).hit, '1');
+        git(nested, 'init', '-q');
+        git(nested, 'remote', 'add', 'origin', sameOrigin ? remote : 'https://github.com/example/nested.git');
+        const after = detect(nested, home, env);
+        assert.strictEqual(after.hit, '0', 'a nearer repository must invalidate the cached root');
+        assert.strictEqual(after.root, fs.realpathSync(nested));
+        assert.strictEqual(after.id === before.id, sameOrigin);
+        const control = detect(nested, home, { ...env, CLV2_PROJECT_CACHE: '0' });
+        assert.strictEqual(after.id, control.id, 'cached discovery must match fresh Git detection');
+      } finally { cleanupDir(tmp); }
+    }
+  }
+});
+
+test('an explicit parent project still wins after the current directory becomes a nested repository', () => {
+  const tmp = createTempDir();
+  try {
+    const home = path.join(tmp, 'home');
+    fs.mkdirSync(home);
+    const parent = makeRepo(tmp, 'explicit-parent', 'https://github.com/example/parent.git');
+    const nested = path.join(parent, 'nested');
+    fs.mkdirSync(nested);
+    const env = { CLAUDE_PROJECT_DIR: parent };
+    const before = detect(nested, home, env);
+    git(nested, 'init', '-q');
+    git(nested, 'remote', 'add', 'origin', 'https://github.com/example/nested.git');
+    const after = detect(nested, home, env);
+    assert.strictEqual(after.hit, '1', 'an explicit project must retain priority over cwd');
+    assert.strictEqual(after.root, before.root);
+    assert.strictEqual(after.id, before.id);
+  } finally { cleanupDir(tmp); }
+});
+
+test('a nearer malformed .git file or broken link invalidates cached parent discovery', () => {
+  for (const link of [false, true]) {
+    const tmp = createTempDir();
+    try {
+      const home = path.join(tmp, 'home'); fs.mkdirSync(home);
+      const parent = makeRepo(tmp, 'marker-parent', 'https://github.com/example/parent.git');
+      const nested = path.join(parent, 'nested'); fs.mkdirSync(nested);
+      detect(nested, home);
+      assert.strictEqual(detect(nested, home).hit, '1');
+      if (link) fs.symlinkSync(path.join(tmp, 'missing-git-dir'), path.join(nested, '.git'));
+      else fs.writeFileSync(path.join(nested, '.git'), 'gitdir: /missing-git-dir\n');
+      const after = detect(nested, home);
+      const control = detect(nested, home, { CLV2_PROJECT_CACHE: '0' });
+      assert.strictEqual(after.hit, '0');
+      assert.strictEqual(after.root, control.root);
+      assert.strictEqual(after.id, control.id);
+    } finally { cleanupDir(tmp); }
+  }
+});
+
+test('cached discovery follows physical ancestors through an explicit symlinked directory', () => {
+  const tmp = createTempDir();
+  try {
+    const home = path.join(tmp, 'home'); fs.mkdirSync(home);
+    const parent = makeRepo(tmp, 'alias-parent', 'https://github.com/example/parent.git');
+    const middle = path.join(parent, 'middle');
+    const nested = path.join(middle, 'nested'); fs.mkdirSync(nested, { recursive: true });
+    const alias = path.join(tmp, 'alias'); fs.symlinkSync(nested, alias);
+    const env = { CLAUDE_PROJECT_DIR: alias };
+    const before = detect(parent, home, env);
+    assert.strictEqual(before.root, fs.realpathSync(parent));
+    assert.strictEqual(detect(parent, home, env).hit, '1');
+    git(middle, 'init', '-q');
+    const after = detect(parent, home, env);
+    assert.strictEqual(after.hit, '0');
+    assert.strictEqual(after.root, fs.realpathSync(middle));
+  } finally { cleanupDir(tmp); }
+});
+
 test('a cached "global" result launches no git process', () => {
   const tmp = createTempDir();
   try {
@@ -676,7 +762,7 @@ test('observe.sh survives an observer.enabled value that contains a newline', ()
   }
 });
 
-test('observe.sh housekeeping runs once a day whoever filled the detection cache', () => {
+test('observe.sh purges daily but enforces the size cap on every call', () => {
   const tmp = createTempDir();
   try {
     const home = path.join(tmp, 'home');
@@ -692,18 +778,18 @@ test('observe.sh housekeeping runs once a day whoever filled the detection cache
     const archiveDir = path.join(projectDir, 'observations.archive');
     assert.match(fs.readFileSync(marker, 'utf8').trim(), /^\d{8}$/, 'the first call records the housekeeping day');
 
-    // Over the size cap, housekeeping already done today: nothing is archived.
+    // Rotation must still run after daily housekeeping has completed.
     fs.appendFileSync(observations, `${'x'.repeat(1024 * 1024 - 1)}\n`.repeat(11));
     runObserve(repo, home, payload);
     const archived = () => (fs.existsSync(archiveDir) ? fs.readdirSync(archiveDir).length : 0);
-    assert.strictEqual(archived(), 0, 'housekeeping must not repeat on the same day');
+    assert.strictEqual(archived(), 1, 'the size cap must apply on the same day');
 
     // The cache is filled (as another caller of detect-project.sh would leave
     // it) but this project has had no housekeeping today: it must run.
     fs.rmSync(marker);
     assert.strictEqual(cacheEntries(home).length, 1);
     runObserve(repo, home, payload);
-    assert.strictEqual(archived(), 1, 'the oversized file must be archived on a cache hit');
+    assert.strictEqual(archived(), 1, 'a small active file must not rotate again');
     assert.ok(fs.existsSync(marker), 'the housekeeping day is recorded again');
   } finally {
     cleanupDir(tmp);

@@ -415,14 +415,9 @@ PYTHON_CMD="${CLV2_PYTHON_CMD:-$PYTHON_CMD}"
 OBSERVATIONS_FILE="${PROJECT_DIR}/observations.jsonl"
 MAX_FILE_SIZE_MB=10
 
-# Housekeeping (old-file purge and size-based archiving) needs find and du,
-# so it runs once a day per project instead of on every call. The day it last
-# ran is kept in its own marker inside the project directory, so the guarantee
-# does not depend on who filled the detection cache (start-observer.sh sources
-# detect-project.sh too, and does no housekeeping). The observations file can
-# therefore exceed MAX_FILE_SIZE_MB by at most one day of records before it is
-# archived. Shells without printf '%(...)T' (bash < 4.2) cannot read the day
-# without a launch and keep running it on every call, as before.
+# Old-file purging runs once a day per project. Size-based rotation still runs
+# on every observation so the existing active-log size limit stays effective.
+# Shells without printf '%(...)T' (bash < 4.2) retain per-call housekeeping.
 _CLV2_HOUSEKEEPING_MARKER="${PROJECT_DIR}/.housekeeping-day"
 _CLV2_HOUSEKEEPING_TODAY=""
 _CLV2_HOUSEKEEPING_LAST=""
@@ -441,21 +436,22 @@ if [ -z "$_CLV2_HOUSEKEEPING_TODAY" ] || [ "$_CLV2_HOUSEKEEPING_LAST" != "$_CLV2
     touch "$PURGE_MARKER" 2>/dev/null || true
   fi
 
-  # Archive if file too large (atomic: rename with unique suffix to avoid race)
-  if [ -f "$OBSERVATIONS_FILE" ]; then
-    file_size_mb=$(du -m "$OBSERVATIONS_FILE" 2>/dev/null | cut -f1)
-    if [ "${file_size_mb:-0}" -ge "$MAX_FILE_SIZE_MB" ]; then
-      archive_dir="${PROJECT_DIR}/observations.archive"
-      mkdir -p "$archive_dir"
-      mv "$OBSERVATIONS_FILE" "$archive_dir/observations-$(date +%Y%m%d-%H%M%S)-$$.jsonl" 2>/dev/null || true
-    fi
-  fi
-
   # Recorded after the work, so an interrupted run is repeated by the next call.
   if [ -n "$_CLV2_HOUSEKEEPING_TODAY" ]; then
     printf '%s\n' "$_CLV2_HOUSEKEEPING_TODAY" > "$_CLV2_HOUSEKEEPING_MARKER" 2>/dev/null || true
   fi
 fi
+
+# Archive if file too large (atomic: rename with unique suffix to avoid race)
+if [ -f "$OBSERVATIONS_FILE" ]; then
+  file_size_mb=$(du -m "$OBSERVATIONS_FILE" 2>/dev/null | cut -f1)
+  if [ "${file_size_mb:-0}" -ge "$MAX_FILE_SIZE_MB" ]; then
+    archive_dir="${PROJECT_DIR}/observations.archive"
+    mkdir -p "$archive_dir"
+    mv "$OBSERVATIONS_FILE" "$archive_dir/observations-$(date +%Y%m%d-%H%M%S)-$$.jsonl" 2>/dev/null || true
+  fi
+fi
+
 
 # ─────────────────────────────────────────────
 # Parse, scrub and write the observation in one interpreter start
